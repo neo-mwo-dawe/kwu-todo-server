@@ -8,12 +8,12 @@ state.py — 글로벌 앱 상태 (KLAS 로그인 세션)
 """
 
 from typing import Optional
-from klas_crawler import KLASClient
+from klas_assignment import KLASCrawler
 
 
 class AppState:
     """KLAS 로그인 세션 상태 (단일 사용자 가정 — 로컬 데스크탑 앱)"""
-    klas_client: Optional[KLASClient] = None
+    klas_client: Optional[KLASCrawler] = None
     student_id: str = ""
     student_name: str = ""
     is_logged_in: bool = False

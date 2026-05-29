@@ -8,7 +8,7 @@ routes/auth.py — KLAS 로그인/로그아웃/상태 엔드포인트
 import logging
 from fastapi import APIRouter
 
-from klas_crawler import KLASClient
+from klas_assignment import KLASCrawler
 from schemas import LoginRequest, LoginResponse, AuthStatusResponse
 from state import state
 
@@ -35,28 +35,40 @@ def login(req: LoginRequest):
             logger.warning(f"[API] 기존 세션 정리 실패(무시): {e}")
         state.klas_client = None
 
-    client = KLASClient()
-    result = client.login(req.student_id, req.password)
+    client = KLASCrawler(headless=True)
+    try:
+        ok = client.login(req.student_id, req.password)
+    except Exception as e:
+        logger.error(f"[API] 로그인 중 예외: {e}")
+        try:
+            client.close()
+        except Exception:
+            pass
+        return LoginResponse(success=False, message=f"로그인 오류: {e}")
 
-    if result.get("success"):
+    if ok:
         state.klas_client = client
         state.student_id = req.student_id
         state.is_logged_in = True
-
-        student = result["student"]
-        state.student_name = student.name or req.student_id
+        # KLASCrawler 는 학생 이름을 따로 수집하지 않으므로 학번을 표시명으로 사용
+        state.student_name = req.student_id
 
         return LoginResponse(
             success=True,
             message="로그인 성공",
             student_name=state.student_name,
             student_id=req.student_id,
-            semester=getattr(student, "semester", "") or "",
+            semester="",
         )
 
+    # 로그인 실패 시 드라이버 정리 (chrome 프로세스 누수 방지)
+    try:
+        client.close()
+    except Exception:
+        pass
     return LoginResponse(
         success=False,
-        message=result.get("message", "로그인 실패"),
+        message="학번 또는 비밀번호가 올바르지 않습니다.",
     )
 
 

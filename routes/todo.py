@@ -31,27 +31,35 @@ router = APIRouter(prefix="/todos", tags=["TODO"])
 # ────────────────────────────────────────────────
 
 def _klas_task_to_response(task) -> TodoResponse:
-    """klas_crawler.TodayTask → schemas.TodoResponse"""
+    """klas_assignment.Task → schemas.TodoResponse"""
     due: Optional[date] = None
-    if getattr(task, "due_date", None):
+    raw_due = getattr(task, "due_date", None)
+    if raw_due:
         try:
-            due = task.due_date if isinstance(task.due_date, date) else \
-                  datetime.strptime(str(task.due_date), "%Y-%m-%d").date()
+            due = raw_due if isinstance(raw_due, date) else \
+                  datetime.strptime(str(raw_due), "%Y-%m-%d").date()
         except (ValueError, TypeError):
             pass
 
-    # KLAS priority: 1(긴급) ~ 4(여유)
-    p_int = getattr(task, "priority", 3)
-    priority = "high" if p_int <= 2 else ("medium" if p_int == 3 else "low")
+    # klas_assignment.Task 는 days_left(남은 일수)로 긴급도를 표현 → priority 변환
+    days_left = getattr(task, "days_left", None)
+    if days_left is None:
+        priority = "low"
+    elif days_left <= 3:
+        priority = "high"
+    elif days_left <= 7:
+        priority = "medium"
+    else:
+        priority = "low"
 
     return TodoResponse(
         id=f"klas_{uuid.uuid4().hex[:8]}",
         title=task.title,
         due_date=due,
         priority=priority,
-        category=_convert_category(getattr(task, "task_type", "LMS과제")),
+        category=_convert_category(getattr(task, "task_type", "과제")),
         source_event=getattr(task, "course_name", "") or "KLAS",
-        is_done=False,
+        is_done=getattr(task, "is_done", False),
         created_at=datetime.now(),
     )
 
@@ -74,6 +82,11 @@ def _convert_category(cat: str) -> str:
     mapping = {
         "학사일정": "학업",
         "LMS과제": "학업",
+        "과제": "학업",
+        "팀프로젝트": "학업",
+        "프로젝트": "학업",
+        "온라인강의": "학업",
+        "퀴즈": "학업",
         "시험준비": "학업",
         "시험": "학업",
         "수강신청": "행정",
@@ -139,7 +152,7 @@ def generate_todos(
     if state.is_logged_in and state.klas_client is not None:
         try:
             logger.info("[generate_todos] KLAS 크롤링 시작")
-            tasks = state.klas_client.get_today_tasks()
+            tasks = state.klas_client.collect_all()
             klas_todos = [_klas_task_to_response(t) for t in tasks]
             logger.info(f"[generate_todos] KLAS 과제 {len(klas_todos)}건 수집")
         except Exception as e:
