@@ -15,6 +15,8 @@ from datetime import datetime
 
 from routes.todo import router as todos_router          # 수정: routes.todos → routes.todo
 from routes.schedules import router as schedules_router
+from routes.auth import router as auth_router          # KLAS 로그인 라우터 (성호 통합)
+from state import state                                 # 전역 KLAS 세션
 
 
 # ────────────────────────────────────────────────
@@ -27,6 +29,13 @@ async def lifespan(app: FastAPI):
     # TODO: await crawler.run_initial_crawl()
     # TODO: db.init()
     yield
+    # 종료 시 KLAS 브라우저 드라이버 정리 (selenium 누수 방지)
+    if state.klas_client:
+        try:
+            state.klas_client.close()
+            print("[STOP] KLAS 세션 정리 완료")
+        except Exception as e:
+            print(f"[STOP] KLAS 정리 중 오류(무시): {e}")
     print("[STOP] 서버 종료")
 
 
@@ -54,6 +63,7 @@ app.add_middleware(
 # 라우터 등록
 # ────────────────────────────────────────────────
 
+app.include_router(auth_router)        # /auth/login, /auth/logout, /auth/status
 app.include_router(todos_router)       # /todos/*
 app.include_router(schedules_router)   # /schedules/*
 

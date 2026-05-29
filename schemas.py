@@ -5,6 +5,32 @@ import uuid
 
 
 # ────────────────────────────────────────────────
+# KLAS 인증 스키마 (성호 KLAS 연동)
+# ────────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    """POST /auth/login - KLAS 로그인 요청"""
+    student_id: str = Field(..., description="학번")
+    password: str = Field(..., description="KLAS 비밀번호")
+
+
+class LoginResponse(BaseModel):
+    """POST /auth/login - KLAS 로그인 응답"""
+    success: bool
+    message: str
+    student_name: str = ""
+    student_id: str = ""
+    semester: str = ""
+
+
+class AuthStatusResponse(BaseModel):
+    """GET /auth/status - 로그인 상태 확인"""
+    logged_in: bool
+    student_id: str = ""
+    student_name: str = ""
+
+
+# ────────────────────────────────────────────────
 # TODO 스키마
 # ────────────────────────────────────────────────
 

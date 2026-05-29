@@ -19,10 +19,41 @@ from schemas import (
     MessageResponse,
 )
 from database import fake_todos, fake_schedules
+from state import state   # KLAS 로그인 세션 공유
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/todos", tags=["TODO"])
+
+
+# ────────────────────────────────────────────────
+# KLAS TodayTask → TodoResponse 변환
+# ────────────────────────────────────────────────
+
+def _klas_task_to_response(task) -> TodoResponse:
+    """klas_crawler.TodayTask → schemas.TodoResponse"""
+    due: Optional[date] = None
+    if getattr(task, "due_date", None):
+        try:
+            due = task.due_date if isinstance(task.due_date, date) else \
+                  datetime.strptime(str(task.due_date), "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            pass
+
+    # KLAS priority: 1(긴급) ~ 4(여유)
+    p_int = getattr(task, "priority", 3)
+    priority = "high" if p_int <= 2 else ("medium" if p_int == 3 else "low")
+
+    return TodoResponse(
+        id=f"klas_{uuid.uuid4().hex[:8]}",
+        title=task.title,
+        due_date=due,
+        priority=priority,
+        category=_convert_category(getattr(task, "task_type", "LMS과제")),
+        source_event=getattr(task, "course_name", "") or "KLAS",
+        is_done=False,
+        created_at=datetime.now(),
+    )
 
 
 # ────────────────────────────────────────────────
@@ -103,6 +134,17 @@ def generate_todos(
     today = date.today()
     deadline = today + timedelta(days=period_days)
 
+    # ── KLAS 과제/퀴즈 (로그인 상태일 때만) ────────────
+    klas_todos: List[TodoResponse] = []
+    if state.is_logged_in and state.klas_client is not None:
+        try:
+            logger.info("[generate_todos] KLAS 크롤링 시작")
+            tasks = state.klas_client.get_today_tasks()
+            klas_todos = [_klas_task_to_response(t) for t in tasks]
+            logger.info(f"[generate_todos] KLAS 과제 {len(klas_todos)}건 수집")
+        except Exception as e:
+            logger.warning(f"[generate_todos] KLAS 크롤링 실패(무시): {e}")
+
     # ── LLM 파이프라인 시도 ──────────────────────────
     try:
         from crawler import DataCollector
@@ -148,9 +190,11 @@ def generate_todos(
         todo_list = generator.generate(crawled)
 
         todos = [_convert_generated_todo(item) for item in todo_list.sorted_by_priority()]
+        # KLAS 과제는 학사일정보다 우선순위 높게 앞에 배치
+        todos = klas_todos + todos
         based_on = [e.title for e in crawled.academic_events]
 
-        logger.info(f"[generate_todos] LLM 파이프라인 완료: {len(todos)}개")
+        logger.info(f"[generate_todos] LLM 파이프라인 완료: 학사 {len(todos) - len(klas_todos)}개 + KLAS {len(klas_todos)}개")
         return GenerateTodoResponse(
             todos=todos,
             generated_count=len(todos),
@@ -169,13 +213,14 @@ def generate_todos(
     ]
 
     if not target_schedules:
+        # 학사일정이 없어도 KLAS 과제는 반환
         return GenerateTodoResponse(
-            todos=[],
-            generated_count=0,
+            todos=klas_todos,
+            generated_count=len(klas_todos),
             based_on_schedules=[],
         )
 
-    generated_todos: List[TodoResponse] = []
+    generated_todos: List[TodoResponse] = list(klas_todos)
     for sched in target_schedules:
         todo = TodoResponse(
             id=str(uuid.uuid4()),
