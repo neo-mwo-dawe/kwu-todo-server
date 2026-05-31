@@ -1,9 +1,3 @@
-"""
-광운대 학사 TODO 자동 생성 시스템 - FastAPI 로컬 서버
-실행: uvicorn main:app --reload --port 8000
-   또는 python main.py (WinForms subprocess 실행용)
-"""
-
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -29,13 +23,25 @@ async def lifespan(app: FastAPI):
     # TODO: await crawler.run_initial_crawl()
     # TODO: db.init()
     yield
-    # 종료 시 KLAS 브라우저 드라이버 정리 (selenium 누수 방지)
-    if state.klas_client:
-        try:
-            state.klas_client.close()
-            print("[STOP] KLAS 세션 정리 완료")
-        except Exception as e:
-            print(f"[STOP] KLAS 정리 중 오류(무시): {e}")
+    # 종료 시 SESSION_STORAGE 내 모든 Selenium 드라이버 정리
+    try:
+        from routes.auth import SESSION_STORAGE
+        for sid, user_session in list(SESSION_STORAGE.items()):
+            client = user_session.get("klas_client")
+            if client:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        SESSION_STORAGE.clear()
+        print("[STOP] 모든 KLAS 세션 정리 완료")
+    except Exception as e:
+        print(f"[STOP] 세션 정리 중 오류(무시): {e}")
+
+    state.klas_client = None
+    state.is_logged_in = False
+    state.student_id = ""
+    state.student_name = ""
     print("[STOP] 서버 종료")
 
 
@@ -51,9 +57,15 @@ app = FastAPI(
 )
 
 # C# WinForms 앱에서 localhost로 호출하므로 CORS 허용
+# 포트 포함/미포함 모두 등록 (Starlette는 origin을 포트까지 포함해 엄격 비교)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost", "http://127.0.0.1"],
+    allow_origins=[
+        "http://localhost",
+        "http://localhost:8000",
+        "http://127.0.0.1",
+        "http://127.0.0.1:8000",
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
