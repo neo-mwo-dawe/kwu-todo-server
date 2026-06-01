@@ -62,6 +62,8 @@ class KLASClient:
     MAIN_URL    = "https://klas.kw.ac.kr/std/cmn/frame/DashBoardStdPage.do"
     TASK_URL    = "https://klas.kw.ac.kr/std/lis/evltn/TaskStdPage.do"
     QUIZ_URL    = "https://klas.kw.ac.kr/std/lis/evltn/AnytmQuizStdPage.do"
+    # ✅ [추가] 팀프로젝트 페이지 URL
+    PROJECT_URL = "https://klas.kw.ac.kr/std/lis/evltn/PrjctStdPage.do"
 
     def __init__(self):
         self.driver = None
@@ -161,22 +163,17 @@ class KLASClient:
             time.sleep(2)
             soup = BeautifulSoup(self.driver.page_source, "html.parser")
 
-            # 수강과목 파싱 - KLAS 대시보드 구조
-            # 과목명이 있는 링크나 텍스트 찾기
             for el in soup.select(".course-name, .subject-name, .crs-nm, .gwMjNm"):
                 name = el.get_text(strip=True)
                 if name and len(name) > 2:
                     courses.append({"name": name, "id": ""})
 
-            # 위 방법으로 못 찾으면 수강과목 텍스트 옆 링크 찾기
             if not courses:
                 for el in soup.find_all(["a", "span", "div"]):
                     text = el.get_text(strip=True)
-                    # 과목코드 패턴: I030-2-0448-02 형태
                     if re.search(r'I\d{3,4}-\d-\d{4}-\d{2}', text):
                         courses.append({"name": text, "id": ""})
 
-            # JavaScript로 렌더링된 경우 직접 URL로 접근
             if not courses:
                 logger.info("[KLAS] 대시보드 파싱 실패, 과목 페이지 직접 접근 시도")
 
@@ -201,7 +198,10 @@ class KLASClient:
         # 2. 퀴즈 수집 (AnytmQuizStdPage)
         tasks.extend(self._fetch_quizzes())
 
-        # 3. 학사일정 수집
+        # ✅ [추가] 3. 팀프로젝트 수집 (PrjctStdPage)
+        tasks.extend(self._fetch_projects())
+
+        # 4. 학사일정 수집  ← 기존 3번에서 4번으로 번호만 변경
         tasks.extend(self._fetch_academic_calendar())
 
         # 중복 제거 및 정렬
@@ -225,7 +225,6 @@ class KLASClient:
             time.sleep(2)
             soup = BeautifulSoup(self.driver.page_source, "html.parser")
 
-            # 과목 선택 드롭다운에서 과목 목록 가져오기
             course_options = []
             select_el = soup.select_one("select[name*='crs'], select[name*='course'], #selectGwNo, .selectGwNo")
             if select_el:
@@ -237,12 +236,10 @@ class KLASClient:
 
             logger.info(f"[KLAS] 과제 페이지 과목 수: {len(course_options)}")
 
-            # 과목별로 과제 수집
             if course_options:
                 for course in course_options:
                     tasks.extend(self._fetch_task_for_course(course))
             else:
-                # 드롭다운 없으면 현재 페이지에서 바로 파싱
                 tasks.extend(self._parse_task_table(soup, "전체"))
 
         except Exception as e:
@@ -254,7 +251,6 @@ class KLASClient:
         """특정 과목의 과제 수집"""
         tasks = []
         try:
-            # 과목 선택 후 페이지 로드
             select_el = self.driver.find_element(
                 By.CSS_SELECTOR, "select[name*='crs'], select[name*='course'], #selectGwNo, .selectGwNo"
             )
@@ -275,7 +271,6 @@ class KLASClient:
         tasks = []
         for table in soup.find_all("table"):
             headers = [th.get_text(strip=True) for th in table.find_all("th")]
-            # 과제 관련 테이블인지 확인
             if not any(h in ["과제 제목", "제목", "과제명"] for h in headers):
                 continue
 
@@ -287,7 +282,6 @@ class KLASClient:
                 title = cols[1].get_text(strip=True) if len(cols) > 1 else cols[0].get_text(strip=True)
                 date_text = ""
 
-                # 날짜 컬럼 찾기
                 for col in cols:
                     text = col.get_text(strip=True)
                     if re.search(r'\d{4}[-./]\d{2}[-./]\d{2}', text):
@@ -296,7 +290,6 @@ class KLASClient:
 
                 if title and len(title) > 1:
                     due_date, due_str, priority = self._parse_due(date_text)
-                    # 이미 마감된 과제는 제외
                     if due_date and (due_date.date() - date.today()).days < -7:
                         continue
 
@@ -317,6 +310,131 @@ class KLASClient:
                     ))
 
         return tasks
+
+    # ✅ [추가] 팀프로젝트 수집 메서드 3개 ─────────────────────────────────────
+
+    def _fetch_projects(self) -> List[TodayTask]:
+        """팀프로젝트 페이지(PrjctStdPage)에서 프로젝트 목록 수집"""
+        tasks = []
+        try:
+            self.driver.get(self.PROJECT_URL)
+            time.sleep(2)
+            soup = BeautifulSoup(self.driver.page_source, "html.parser")
+
+            course_options = []
+            select_el = soup.select_one(
+                "select[name*='crs'], select[name*='course'], #selectGwNo, .selectGwNo"
+            )
+            if select_el:
+                for opt in select_el.find_all("option"):
+                    val  = opt.get("value", "")
+                    name = opt.get_text(strip=True)
+                    if val and name and val != "":
+                        course_options.append({"value": val, "name": name})
+
+            logger.info(f"[KLAS] 팀프로젝트 페이지 과목 수: {len(course_options)}")
+
+            if course_options:
+                for course in course_options:
+                    tasks.extend(self._fetch_project_for_course(course))
+            else:
+                tasks.extend(self._parse_project_table(soup, "전체"))
+
+        except Exception as e:
+            logger.error(f"[KLAS] 팀프로젝트 수집 오류: {e}")
+
+        return tasks
+
+    def _fetch_project_for_course(self, course: dict) -> List[TodayTask]:
+        """특정 과목의 팀프로젝트 수집"""
+        tasks = []
+        try:
+            select_el = self.driver.find_element(
+                By.CSS_SELECTOR,
+                "select[name*='crs'], select[name*='course'], #selectGwNo, .selectGwNo"
+            )
+            from selenium.webdriver.support.ui import Select
+            Select(select_el).select_by_value(course["value"])
+            time.sleep(1.5)
+
+            soup = BeautifulSoup(self.driver.page_source, "html.parser")
+            tasks = self._parse_project_table(soup, course["name"])
+
+        except Exception as e:
+            logger.warning(f"[KLAS] {course['name']} 팀프로젝트 수집 실패: {e}")
+
+        return tasks
+
+    def _parse_project_table(self, soup: BeautifulSoup, course_name: str) -> List[TodayTask]:
+        """팀프로젝트 테이블 파싱
+
+        KLAS PrjctStdPage 컬럼 구조 (일반적):
+          번호 | 프로젝트명 | 분류 | 팀명 | 제출기간(시작~종료) | 제출여부
+        """
+        tasks = []
+        for table in soup.find_all("table"):
+            headers = [th.get_text(strip=True) for th in table.find_all("th")]
+
+            is_project_table = any(
+                h in ["프로젝트명", "제목", "과제명", "팀프로젝트", "프로젝트 제목"]
+                for h in headers
+            )
+            if not is_project_table:
+                continue
+
+            for row in table.find_all("tr")[1:]:
+                cols = row.find_all("td")
+                if len(cols) < 2:
+                    continue
+
+                title = ""
+                url   = ""
+                for i, col in enumerate(cols):
+                    text = col.get_text(strip=True)
+                    if text.isdigit():                                      # 번호 컬럼 스킵
+                        continue
+                    if text in ("미제출", "제출", "완료", "-"):             # 제출여부 컬럼 스킵
+                        continue
+                    if re.search(r"\d{4}[-./]\d{2}[-./]\d{2}", text):      # 날짜 컬럼 스킵
+                        continue
+                    if len(text) > len(title):                              # 가장 긴 텍스트 = 제목
+                        title = text
+                        link_tag = col.find("a")
+                        if link_tag and link_tag.get("href"):
+                            href = link_tag["href"]
+                            url = href if href.startswith("http") else "https://klas.kw.ac.kr" + href
+
+                # 날짜: "시작일 ~ 종료일" 형태 탐색, 범위(~) 우선
+                date_text = ""
+                for col in cols:
+                    text = col.get_text(strip=True)
+                    if "~" in text and re.search(r"\d{4}[-./]\d{2}[-./]\d{2}", text):
+                        date_text = text
+                        break
+                    if re.search(r"\d{4}[-./]\d{2}[-./]\d{2}", text):
+                        date_text = text
+
+                if not title or len(title) <= 1:
+                    continue
+
+                due_date, due_str, priority = self._parse_due(date_text)
+
+                if due_date and (due_date.date() - date.today()).days < -7:
+                    continue
+
+                tasks.append(TodayTask(
+                    title=title,
+                    course_name=course_name,
+                    task_type="팀프로젝트",      # ← 기존 "과제"/"퀴즈"와 구분되는 새 타입
+                    due_date=due_date,
+                    due_str=due_str,
+                    priority=priority,
+                    url=url,
+                ))
+
+        return tasks
+
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _fetch_quizzes(self) -> List[TodayTask]:
         """수시퀴즈 페이지에서 퀴즈 목록 수집"""
@@ -402,7 +520,6 @@ class KLASClient:
             ("%Y-%m-%d",          r"\d{4}-\d{2}-\d{2}"),
         ]
         for fmt, pattern in patterns:
-            # 날짜 범위에서 종료일(~뒤) 추출
             range_match = re.search(r'~\s*(' + pattern + r')', raw)
             if range_match:
                 try:
