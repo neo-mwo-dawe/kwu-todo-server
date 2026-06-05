@@ -4,8 +4,8 @@ crawler.py
 
 수집 대상:
   1. 광운대 학사일정 (로그인 불필요)
-  2. KLAS 과제/퀴즈  (klas_crawler.KLASClient 세션 재사용)
-  3. KLAS 온라인강의 미수강 목록 (klas_crawler.KLASClient 세션 재사용)
+  2. KLAS 과제/퀴즈  (klas_assignment.KLASCrawler 세션 재사용)
+  3. KLAS 온라인강의 미수강 목록 (klas_assignment.KLASCrawler 세션 재사용)
 """
 
 import re
@@ -497,11 +497,11 @@ class KlasLectureCrawler:
 class DataCollector:
     """
     모든 크롤러를 통합 실행하는 퍼사드 클래스
-    klas_crawler.KLASClient로 로그인 후 driver를 전달받아 사용합니다.
+    klas_assignment.KLASCrawler로 로그인 후 driver를 전달받아 사용합니다.
 
     사용 예시:
-        from klas_crawler import KLASClient
-        client = KLASClient()
+        from klas_assignment import KLASCrawler
+        client = KLASCrawler()
         client.login(student_id, password)
 
         collector = DataCollector(klas_driver=client.driver)
@@ -511,7 +511,7 @@ class DataCollector:
     def __init__(self, klas_driver=None):
         """
         Args:
-            klas_driver: KLASClient.driver (Selenium WebDriver, 로그인 완료 상태)
+            klas_driver: KLASCrawler.driver (Selenium WebDriver, 로그인 완료 상태)
                          None이면 학사일정만 수집
         """
         self.klas_driver = klas_driver
