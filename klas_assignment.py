@@ -1,10 +1,19 @@
 """
 klas_assignment.py
-KLAS 로그인 후 4가지 정보 크롤링:
-  1. 과제     : /std/lis/evltn/TaskStdPage.do
-  2. 팀프로젝트: /std/lis/evltn/PrjctStdPage.do
-  3. 온라인강의: /std/lis/evltn/OnlineCntntsStdPage.do (과목별)
-  4. 강의실   : /std/lis/evltn/LctrumHomeStdPage.do   (과목별 현황)
+KLAS 로그인 후 수강과목별 정보 수집 (과제 / 팀프로젝트 / 온라인강의)
+
+수집 방식: KLAS 내부 JSON API 직접 호출
+  · 과목 목록   : 대시보드 Vue 앱(appModule.atnlcSbjectList)에서 추출
+  · 과제        : POST /std/lis/evltn/TaskStdList.do
+  · 팀프로젝트  : POST /std/lis/evltn/PrjctStdList.do
+  · 온라인강의  : POST /std/lis/evltn/SelectOnlineCntntsStdList.do
+
+이전에는 각 페이지의 DOM 을 BeautifulSoup 으로 긁었으나, KLAS 가 SPA 라
+비동기 렌더링 타이밍/구조 차이로 특히 팀프로젝트가 자주 0건으로 누락됐다.
+API 를 직접 호출하면 제출여부·마감일이 JSON 으로 정확히 들어와 누락이 없다.
+
+API 방식·엔드포인트 출처: KLAS Helper (MIT License, © 2020-2021 nbsp1221)
+  https://github.com/nbsp1221/klas-helper
 
 실행:
     python klas_assignment.py
@@ -24,7 +33,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -73,16 +81,19 @@ class Task:
 
 
 # ──────────────────────────────────────────────
-# KLAS 크롤러
+# KLAS 크롤러 (JSON API 방식)
 # ──────────────────────────────────────────────
 
 class KLASCrawler:
 
-    TASK_URL    = f"{BASE_URL}/std/lis/evltn/TaskStdPage.do"
-    PROJECT_URL = f"{BASE_URL}/std/lis/evltn/PrjctStdPage.do"
-    ONLINE_URL  = f"{BASE_URL}/std/lis/evltn/OnlineCntntsStdPage.do"
-    HOME_URL    = f"{BASE_URL}/std/lis/evltn/LctrumHomeStdPage.do"
-    LOGIN_URL   = f"{BASE_URL}/usr/cmn/login/LoginForm.do"
+    LOGIN_URL     = f"{BASE_URL}/usr/cmn/login/LoginForm.do"
+    DASHBOARD_URL = f"{BASE_URL}/std/cmn/frame/Frame.do"
+
+    # KLAS 내부 JSON API (출처: KLAS Helper, MIT © nbsp1221)
+    #   body = {selectSubj, selectYearhakgi, selectChangeYn:'Y'}
+    TASK_API    = "/std/lis/evltn/TaskStdList.do"               # 과제
+    PROJECT_API = "/std/lis/evltn/PrjctStdList.do"              # 팀프로젝트
+    ONLINE_API  = "/std/lis/evltn/SelectOnlineCntntsStdList.do"  # 온라인강의
 
     def __init__(self, headless: bool = True):
         options = Options()
@@ -98,9 +109,10 @@ class KLASCrawler:
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
         self.driver    = webdriver.Chrome(options=options)
+        self.driver.set_script_timeout(30)   # execute_async_script(fetch) 대기 시간
         self.wait      = WebDriverWait(self.driver, 15)
         self.logged_in = False
-        self._courses  = []  # [(index, name)] 캐시
+        self._logged_keys = set()             # API 응답 필드명 1회 로깅용 (필드 확인/디버깅)
 
     # ── 로그인 ──────────────────────────────────
 
@@ -139,10 +151,10 @@ class KLASCrawler:
 
     def _parse_due(self, raw: str):
         """마감일 파싱 → (due_date, due_str, days_left)"""
-        if not raw or raw.strip() == "":
+        if not raw or str(raw).strip() == "":
             return None, "마감일 미정", None
 
-        raw = raw.strip()
+        raw = str(raw).strip()
         dt  = None
         patterns = [
             ("%Y-%m-%d %H:%M:%S", r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"),
@@ -186,275 +198,176 @@ class KLASCrawler:
 
         return dt.date(), due_str, days_left
 
-    # ── 과목 드롭다운 ────────────────────────────
+    # ── 수강과목 목록 (대시보드 Vue 데이터) ──────
 
-    def _get_course_options(self) -> List[tuple]:
-        """드롭다운에서 과목 목록 추출 → [(index, name)]"""
-        if self._courses:
-            return self._courses
-        courses = []
-        try:
-            selects = self.driver.find_elements(By.CSS_SELECTOR, "select")
-            target  = None
-            for sel in selects:
-                opts = sel.find_elements(By.TAG_NAME, "option")
-                for opt in opts:
-                    if "I030" in opt.text or any(k in opt.text for k in ["디지털", "소프트", "알고리즘", "컴퓨터", "응용"]):
-                        target = sel
-                        break
-                if target:
-                    break
-            if not target and selects:
-                target = max(selects, key=lambda s: len(s.find_elements(By.TAG_NAME, "option")))
-            if target:
-                for i, opt in enumerate(target.find_elements(By.TAG_NAME, "option")):
-                    name = opt.text.strip()
-                    if name:
-                        courses.append((i, name, target))
-        except Exception as e:
-            logger.warning(f"[과목목록] {e}")
-        self._courses = courses
-        return courses
+    def _get_subjects(self) -> List[dict]:
+        """
+        대시보드 프레임에서 수강과목 목록을 추출한다.
+        KLAS Helper 가 사용하는 appModule.atnlcSbjectList 를 읽는다.
+        각 항목: {subj(과목코드), subjNm(과목명), yearhakgi(년학기)}
+        """
+        self.driver.get(self.DASHBOARD_URL)
+        time.sleep(2.5)
 
-    def _select_course(self, idx: int, courses: list):
-        """index로 과목 선택 (value=[object Object]라 click 사용)"""
-        try:
-            selects = self.driver.find_elements(By.CSS_SELECTOR, "select")
-            target  = None
-            for sel in selects:
-                opts = sel.find_elements(By.TAG_NAME, "option")
-                for opt in opts:
-                    if "I030" in opt.text or any(k in opt.text for k in ["디지털", "소프트", "알고리즘", "컴퓨터", "응용"]):
-                        target = sel
-                        break
-                if target:
-                    break
-            if target:
-                opts = target.find_elements(By.TAG_NAME, "option")
-                if idx < len(opts):
-                    opts[idx].click()
-                    time.sleep(1.5)
-                    return True
-        except Exception as e:
-            logger.warning(f"[과목선택] {e}")
-        return False
-
-    # ── 1. 과제 크롤링 ──────────────────────────
-
-    def get_assignments(self) -> List[Task]:
-        """TaskStdPage.do — 과제 수집"""
-        logger.info("[KLAS] 과제 수집 중...")
-        self.driver.get(self.TASK_URL)
-        time.sleep(2)
-
-        tasks   = []
-        courses = self._get_course_options()
-        logger.info(f"[KLAS] 과목 {len(courses)}개")
-
-        for idx, name, _ in courses:
+        subjects = None
+        exprs = [
+            "return (typeof appModule !== 'undefined' && appModule.atnlcSbjectList) ? appModule.atnlcSbjectList : null;",
+            "return (typeof appModule !== 'undefined' && appModule.$data && appModule.$data.atnlcSbjectList) ? appModule.$data.atnlcSbjectList : null;",
+        ]
+        for expr in exprs:
             try:
-                self._select_course(idx, courses)
-                soup = BeautifulSoup(self.driver.page_source, "html.parser")
+                subjects = self.driver.execute_script(expr)
+            except Exception:
+                subjects = None
+            if subjects:
+                break
 
-                for table in soup.find_all("table"):
-                    headers = [th.get_text(strip=True) for th in table.find_all("th")]
-                    if "과제 제목" not in headers or "제출기한" not in headers:
-                        continue
+        result = []
+        if subjects:
+            for s in subjects:
+                subj = s.get("subj") or s.get("subjCd") or s.get("subject")
+                yh   = s.get("yearhakgi") or s.get("yearHakgi") or s.get("yearhakgiCd")
+                nm   = s.get("subjNm") or s.get("subjectNm") or s.get("subjectName") or ""
+                if subj and yh:
+                    result.append({"subj": subj, "yearhakgi": yh, "name": nm or subj})
+        else:
+            logger.warning("[KLAS] 대시보드에서 수강과목 목록을 찾지 못함 (appModule.atnlcSbjectList 없음)")
 
-                    title_idx  = headers.index("과제 제목")
-                    date_idx   = headers.index("제출기한")
-                    status_idx = headers.index("상태") if "상태" in headers else -1
+        return result
 
-                    for row in table.find_all("tr")[1:]:
-                        cols = row.find_all("td")
-                        if len(cols) <= title_idx:
-                            continue
-                        title = cols[title_idx].get_text(strip=True)
-                        if not title or len(title) < 2:
-                            continue
+    # ── KLAS JSON API 호출 (브라우저 세션 컨텍스트) ─
 
-                        date_raw  = cols[date_idx].get_text(strip=True) if date_idx < len(cols) else ""
-                        is_done   = False
-                        if status_idx >= 0 and status_idx < len(cols):
-                            is_done = cols[status_idx].get_text(strip=True) == "제출"
+    def _api_post(self, endpoint: str, subj: str, yearhakgi: str) -> list:
+        """
+        로그인된 브라우저 세션에서 KLAS JSON API 를 POST 호출한다.
+        같은 출처(same-origin) fetch 라 세션 쿠키가 자동 전송된다.
+        """
+        body = json.dumps({
+            "selectSubj": subj,
+            "selectYearhakgi": yearhakgi,
+            "selectChangeYn": "Y",
+        })
+        script = """
+            const cb = arguments[arguments.length - 1];
+            fetch(arguments[0], {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json;charset=UTF-8'},
+                body: arguments[1],
+                credentials: 'same-origin'
+            })
+            .then(r => r.json())
+            .then(d => cb(d))
+            .catch(e => cb({__error: String(e)}));
+        """
+        try:
+            data = self.driver.execute_async_script(script, endpoint, body)
+        except Exception as e:
+            logger.warning(f"[API] {endpoint} 호출 실패: {e}")
+            return []
 
-                        due_date, due_str, days_left = self._parse_due(date_raw)
-                        if days_left is not None and days_left < -7:
-                            continue
+        if isinstance(data, dict) and data.get("__error"):
+            logger.warning(f"[API] {endpoint} 응답 오류: {data['__error']}")
+            return []
+        return data if isinstance(data, list) else []
 
-                        task_type = "프로젝트" if any(k in title for k in ["Project", "프로젝트"]) else "과제"
-                        tasks.append(Task(task_type, name, title, due_str, due_date, is_done, days_left))
+    def _log_keys(self, tag: str, items: list):
+        """API 응답 첫 항목의 필드명을 1회만 로깅 (필드 확인용)"""
+        if tag not in self._logged_keys and isinstance(items, list) and items:
+            logger.info(f"[API:{tag}] 응답 필드: {list(items[0].keys())}")
+            self._logged_keys.add(tag)
 
-                logger.info(f"  과제 {name}: {sum(1 for t in tasks if t.course_name == name and t.task_type in ['과제','프로젝트'])}개")
-            except Exception as e:
-                logger.warning(f"  과제 {name} 실패: {e}")
+    def _pick_title(self, item: dict) -> str:
+        """JSON 항목에서 제목으로 쓸 값을 골라낸다 (필드명이 항목별로 달라 후보 순회)"""
+        for k in ("title", "moduletitle", "moduleTitle", "lesson", "sbjt",
+                  "rpttitle", "rptTitle", "subject", "prjtitle",
+                  "prjctNm", "prjctTitle", "cntntsNm", "lessonNm", "evltnNm",
+                  "name", "rptNm", "homeworkTitle"):
+            v = item.get(k)
+            if v and str(v).strip():
+                return str(v).strip()
+        return "(제목 미확인)"
 
-        logger.info(f"[KLAS] 과제 총 {len(tasks)}개")
+    # ── 과제/팀프로젝트 파싱 ─────────────────────
+
+    def _parse_homework_items(self, items: list, course_name: str, task_type: str) -> List[Task]:
+        """과제/팀프로젝트 JSON 파싱 (제출 완료·마감 지난 항목 제외)"""
+        tasks = []
+        for hw in items:
+            if str(hw.get("submityn", "")).upper() == "Y":
+                continue
+
+            due_date, due_str, days_left = self._parse_due(hw.get("expiredate", ""))
+
+            # 마감 지났으면 추가 제출 기한 확인
+            if days_left is not None and days_left < 0:
+                re_raw = hw.get("reexpiredate", "")
+                if not re_raw:
+                    continue
+                due_date, due_str, days_left = self._parse_due(re_raw)
+                if days_left is not None and days_left < 0:
+                    continue
+
+            title = self._pick_title(hw)
+            tasks.append(Task(task_type, course_name, title, due_str, due_date, False, days_left))
         return tasks
 
-    # ── 2. 팀프로젝트 크롤링 ────────────────────
+    # ── 온라인강의 파싱 ──────────────────────────
 
-    def get_projects(self) -> List[Task]:
-        """PrjctStdPage.do — 팀프로젝트 수집"""
-        logger.info("[KLAS] 팀프로젝트 수집 중...")
-        self._courses = []  # 드롭다운 캐시 초기화
-        self.driver.get(self.PROJECT_URL)
-        time.sleep(2)
-
-        tasks   = []
-        courses = self._get_course_options()
-
-        for idx, name, _ in courses:
+    def _parse_lecture_items(self, items: list, course_name: str) -> List[Task]:
+        """온라인강의 JSON 파싱 (진도 100% 아님 & 마감 안 지난 미수강분만)"""
+        tasks = []
+        for lec in items:
+            if lec.get("evltnSe") and lec.get("evltnSe") != "lesson":
+                continue
             try:
-                self._select_course(idx, courses)
-                soup = BeautifulSoup(self.driver.page_source, "html.parser")
+                if float(lec.get("prog", 0)) >= 100:
+                    continue
+            except (TypeError, ValueError):
+                pass
 
-                for table in soup.find_all("table"):
-                    headers = [th.get_text(strip=True) for th in table.find_all("th")]
-                    if not any(h in headers for h in ["팀프로젝트명", "제목", "프로젝트명"]):
-                        continue
+            due_date, due_str, days_left = self._parse_due(lec.get("endDate", ""))
+            if days_left is not None and days_left < 0:
+                continue
 
-                    for row in table.find_all("tr")[1:]:
-                        cols = row.find_all("td")
-                        if len(cols) < 2:
-                            continue
-
-                        title    = cols[1].get_text(strip=True) if len(cols) > 1 else cols[0].get_text(strip=True)
-                        date_raw = ""
-                        status   = ""
-
-                        for col in cols:
-                            text = col.get_text(strip=True)
-                            if re.search(r"\d{4}[-./]\d{2}[-./]\d{2}", text):
-                                date_raw = text
-                            if text in ["제출", "미제출", "미제출(재제출가능)"]:
-                                status = text
-
-                        if not title or len(title) < 2:
-                            continue
-
-                        is_done   = status == "제출"
-                        due_date, due_str, days_left = self._parse_due(date_raw)
-                        if days_left is not None and days_left < -7:
-                            continue
-
-                        tasks.append(Task("팀프로젝트", name, title, due_str, due_date, is_done, days_left))
-
-            except Exception as e:
-                logger.warning(f"  팀프로젝트 {name} 실패: {e}")
-
-        logger.info(f"[KLAS] 팀프로젝트 {len(tasks)}개")
-        return tasks
-
-    # ── 3. 온라인강의 크롤링 ─────────────────────
-
-    def get_online_lectures(self) -> List[Task]:
-        """
-        OnlineCntntsStdPage.do — 온라인강의 미수강 수집
-        달성시간 < 인정시간 인 항목만 추출
-        """
-        logger.info("[KLAS] 온라인강의 수집 중...")
-        self._courses = []
-        self.driver.get(self.ONLINE_URL)
-        time.sleep(2)
-
-        tasks   = []
-        courses = self._get_course_options()
-
-        for idx, name, _ in courses:
-            try:
-                self._select_course(idx, courses)
-                soup = BeautifulSoup(self.driver.page_source, "html.parser")
-
-                for table in soup.find_all("table"):
-                    headers = [th.get_text(strip=True) for th in table.find_all("th")]
-
-                    # 온라인강의 테이블 판별
-                    if not any(h in headers for h in ["학습목차", "강의명", "학습목표"]):
-                        continue
-
-                    # 인정시간, 달성시간 컬럼 인덱스
-                    cert_idx  = -1
-                    reach_idx = -1
-                    date_idx  = -1
-                    title_idx = -1
-
-                    for i, h in enumerate(headers):
-                        if "학습목차" in h or "강의명" in h:
-                            title_idx = i
-                        if "인정시간" in h:
-                            cert_idx = i
-                        if "달성시간" in h:
-                            reach_idx = i
-                        if "학습기간" in h or "기간" in h:
-                            date_idx = i
-
-                    for row in table.find_all("tr")[1:]:
-                        cols = row.find_all("td")
-                        if len(cols) < 2:
-                            continue
-
-                        # 제목
-                        t_idx = title_idx if title_idx >= 0 and title_idx < len(cols) else 1
-                        title = cols[t_idx].get_text(strip=True)
-                        if not title or len(title) < 2:
-                            continue
-
-                        # 달성시간 / 인정시간 비교
-                        is_done = True
-                        if cert_idx >= 0 and reach_idx >= 0:
-                            cert  = cols[cert_idx].get_text(strip=True)  if cert_idx  < len(cols) else ""
-                            reach = cols[reach_idx].get_text(strip=True) if reach_idx < len(cols) else ""
-                            # "38/38" 또는 "0/38" 형태
-                            if reach and cert:
-                                try:
-                                    r_num = int(re.sub(r"[^0-9]", "", reach.split("/")[0]))
-                                    c_num = int(re.sub(r"[^0-9]", "", cert))
-                                    is_done = r_num >= c_num
-                                except:
-                                    is_done = "100%" in reach or reach == cert
-                        elif reach_idx >= 0:
-                            reach = cols[reach_idx].get_text(strip=True)
-                            is_done = "100%" in reach
-
-                        # 미수강만 추가
-                        if is_done:
-                            continue
-
-                        # 마감일
-                        date_raw = ""
-                        if date_idx >= 0 and date_idx < len(cols):
-                            date_raw = cols[date_idx].get_text(strip=True)
-                        else:
-                            for col in cols:
-                                text = col.get_text(strip=True)
-                                if re.search(r"\d{4}[-./]\d{2}[-./]\d{2}", text):
-                                    date_raw = text
-                                    break
-
-                        due_date, due_str, days_left = self._parse_due(date_raw)
-                        if days_left is not None and days_left < -7:
-                            continue
-
-                        tasks.append(Task("온라인강의", name, title, due_str, due_date, False, days_left))
-
-            except Exception as e:
-                logger.warning(f"  온라인강의 {name} 실패: {e}")
-
-        logger.info(f"[KLAS] 온라인강의 미수강 {len(tasks)}개")
+            title = self._pick_title(lec)
+            tasks.append(Task("온라인강의", course_name, title, due_str, due_date, False, days_left))
         return tasks
 
     # ── 전체 수집 ────────────────────────────────
 
     def collect_all(self) -> List[Task]:
-        all_tasks = []
-        all_tasks.extend(self.get_assignments())
+        if not self.logged_in:
+            logger.warning("[KLAS] 미로그인 상태 — 수집 중단")
+            return []
 
-        self._courses = []
-        all_tasks.extend(self.get_projects())
+        subjects = self._get_subjects()
+        logger.info(f"[KLAS] 수강과목 {len(subjects)}개")
 
-        self._courses = []
-        all_tasks.extend(self.get_online_lectures())
+        all_tasks: List[Task] = []
+        for s in subjects:
+            subj, yh, name = s["subj"], s["yearhakgi"], s["name"]
+
+            # 과제
+            items = self._api_post(self.TASK_API, subj, yh)
+            self._log_keys("Task", items)
+            hw = self._parse_homework_items(items, name, "과제")
+            # 제목에 Project/프로젝트 포함 시 프로젝트로 재분류 (기존 동작 유지)
+            for t in hw:
+                if any(k in t.title for k in ["Project", "프로젝트"]):
+                    t.task_type = "프로젝트"
+            all_tasks.extend(hw)
+
+            # 팀프로젝트
+            items = self._api_post(self.PROJECT_API, subj, yh)
+            self._log_keys("Prjct", items)
+            all_tasks.extend(self._parse_homework_items(items, name, "팀프로젝트"))
+
+            # 온라인강의
+            items = self._api_post(self.ONLINE_API, subj, yh)
+            self._log_keys("Online", items)
+            all_tasks.extend(self._parse_lecture_items(items, name))
+
+            logger.info(f"  [{name}] 누적 {len(all_tasks)}건")
 
         # 중복 제거
         seen, unique = set(), []
@@ -464,6 +377,7 @@ class KLASCrawler:
                 seen.add(key)
                 unique.append(t)
 
+        logger.info(f"[KLAS] 총 {len(unique)}건 수집 (JSON API)")
         return unique
 
     def close(self):
