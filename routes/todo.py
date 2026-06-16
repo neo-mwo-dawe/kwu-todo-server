@@ -164,13 +164,8 @@ def generate_todos(
         from todo_generator import TodoGenerator
         from llm_client import create_llm_client
 
-        # 크롤링 (LMS/에브리타임 계정은 .env에 설정 시 사용)
-        collector = DataCollector(
-            lms_username=os.getenv("LMS_USERNAME", ""),
-            lms_password=os.getenv("LMS_PASSWORD", ""),
-            everytime_username=os.getenv("EVERYTIME_USERNAME", ""),
-            everytime_password=os.getenv("EVERYTIME_PASSWORD", ""),
-        )
+        # 학사일정 크롤링 (로그인 불필요). KLAS 개인 과제는 위에서 klas_todos로 별도 수집됨.
+        collector = DataCollector()
         crawled = collector.collect_all()
 
         # 크롤링 결과가 비어있으면 fake_schedules를 학사일정으로 사용
@@ -188,17 +183,21 @@ def generate_todos(
             ]
             logger.info(f"[generate_todos] 크롤링 결과 없음 -> fake_schedules {len(crawled.academic_events)}개 사용")
 
-        # period_days 범위 필터
+        # 오늘 ~ deadline 범위의 다가오는 일정만 (지난 일정 제외)
         crawled.academic_events = [
             e for e in crawled.academic_events
-            if e.start_date <= deadline
+            if today <= e.start_date <= deadline
         ]
 
-        # LLM 클라이언트 초기화 (실패 시 ValueError → except로)
+        # LLM 클라이언트 초기화 — API 키 없으면 None으로 두고 규칙 기반 생성
         llm_provider = os.getenv("LLM_PROVIDER", "openai")
-        llm_client = create_llm_client(llm_provider)
+        try:
+            llm_client = create_llm_client(llm_provider)
+        except Exception as e:
+            logger.info(f"[generate_todos] LLM 비활성(키 없음 등) → 규칙 기반 생성: {e}")
+            llm_client = None
 
-        # TodoGenerator는 LLM 실패 시 내부적으로 규칙 기반 폴백 사용
+        # llm_client=None이면 generate() 내부에서 규칙 기반 폴백으로 처리됨
         generator = TodoGenerator(llm_client=llm_client, use_rule_fallback=True)
         todo_list = generator.generate(crawled)
 
