@@ -94,10 +94,17 @@ class CrawledData:
 class AcademicCalendarCrawler:
     """
     광운대 학사일정 페이지 크롤러
-    URL: https://www.kw.ac.kr/ko/life/academic-calendar.jsp
+    URL: https://www.kw.ac.kr/ko/life/bachelor_calendar.jsp
+
+    NOTE: 구 주소 academic-calendar.jsp 는 404(폐지)라 bachelor_calendar.jsp 로 교체함.
+          다만 이 페이지는 일정을 JS + 빈 iframe 으로 동적 렌더링하여 정적 requests
+          로는 일정 표가 안 잡힌다(0건 반환). 따라서 호출부(routes/todo.py)에서
+          crawled.academic_events 가 비면 fake_schedules 로 폴백한다.
+          페이지가 정적 HTML/JSON 엔드포인트를 제공하게 되면 이 크롤러가 자동으로
+          실데이터를 사용한다. (실데이터 크롤링은 추후 과제 — JS 렌더링/엔드포인트 분석 필요)
     """
 
-    URL = "https://www.kw.ac.kr/ko/life/academic-calendar.jsp"
+    URL = "https://www.kw.ac.kr/ko/life/bachelor_calendar.jsp"
 
     CATEGORY_MAP = {
         "수강신청": ["수강신청", "수강변경", "수강취소"],
